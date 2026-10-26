@@ -1,0 +1,7 @@
+.git
+.idea
+.cache
+.env
+bin
+*.pdf
+*.exe

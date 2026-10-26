@@ -1,0 +1,25 @@
+module taskmanager
+
+go 1.25.0
+
+require (
+	github.com/alicebob/miniredis/v2 v2.35.0
+	github.com/go-sql-driver/mysql v1.9.3
+	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/pressly/goose/v3 v3.24.1
+	github.com/redis/go-redis/v9 v9.17.0
+	github.com/sony/gobreaker/v2 v2.4.0
+	golang.org/x/crypto v0.40.0
+	golang.org/x/time v0.14.0
+)
+
+require (
+	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/mfridman/interpolate v0.0.2 // indirect
+	github.com/sethvargo/go-retry v0.3.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	golang.org/x/sync v0.10.0 // indirect
+)
