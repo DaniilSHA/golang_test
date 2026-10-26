@@ -1,0 +1,529 @@
+openapi: 3.0.3
+info:
+  title: Task Manager API
+  version: 1.0.0
+  description: >-
+    Team-scoped task management. All timestamps use UTC. Team membership and
+    role are checked against MySQL on every protected request. Inaccessible
+    team resources return 404. Rate limits return 429 with Retry-After.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Teams
+  - name: Tasks
+  - name: Analytics
+paths:
+  /api/v1/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Register a user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password, name]
+              properties:
+                email: {type: string, format: email, maxLength: 254}
+                password: {type: string, format: password, description: Between 8 and 72 UTF-8 bytes}
+                name: {type: string, minLength: 1, maxLength: 200}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Issue a one-hour access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: {type: string, format: email}
+                password: {type: string, format: password}
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in]
+                properties:
+                  access_token: {type: string}
+                  token_type: {type: string, enum: [Bearer]}
+                  expires_in: {type: integer, example: 3600}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/teams:
+    post:
+      tags: [Teams]
+      operationId: createTeam
+      summary: Create a team and its owner membership atomically
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 200}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Team'}
+        default: {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Teams]
+      operationId: listTeams
+      summary: List only the current user's teams
+      responses:
+        '200':
+          description: Teams
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Team'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/teams/{id}/invite:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+    post:
+      tags: [Teams]
+      operationId: inviteMember
+      summary: Add an existing user by email (owner or admin)
+      description: No email is sent. Unknown users return 404, duplicate membership returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+                role: {type: string, enum: [admin, member], default: member}
+      responses:
+        '204': {description: Member added}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/teams/{id}/members/{user_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: integer, format: int64, minimum: 1}
+    patch:
+      tags: [Teams]
+      operationId: changeMemberRole
+      summary: Change a member or admin role (owner or admin)
+      description: The owner cannot be demoted; the owner role cannot be assigned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [role]
+              properties:
+                role: {type: string, enum: [admin, member]}
+      responses:
+        '204': {description: Role changed}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Teams]
+      operationId: removeMember
+      summary: Remove a member or admin (owner or admin)
+      description: Returns 409 for the owner or a user assigned to any task, including a closed task. Authorship and history remain intact.
+      responses:
+        '204': {description: Member removed}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Create a task in the current user's team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [team_id, title]
+              properties:
+                team_id: {type: integer, format: int64, minimum: 1}
+                title: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string, maxLength: 10000, default: ''}
+                status: {type: string, enum: [todo, in_progress, done], default: todo}
+                assignee_id: {type: integer, format: int64, minimum: 1, nullable: true}
+      responses:
+        '201':
+          description: Task and creation history recorded
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Task'}
+        default: {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: List a team's tasks with filtering and pagination
+      description: >-
+        Ordered by created_at DESC, id DESC. Cached for 300 seconds, with
+        transactional revision invalidation. Cursor pagination starts with
+        pagination=cursor; subsequent requests use next_cursor with the same
+        team and filters. Offset and cursor cannot be combined. Pages are not
+        a persistent snapshot across requests.
+      parameters:
+        - name: team_id
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: status
+          in: query
+          schema: {type: string, enum: [todo, in_progress, done]}
+        - name: assignee_id
+          in: query
+          schema: {type: integer, format: int64, minimum: 1}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Offset'}
+        - name: pagination
+          in: query
+          schema: {type: string, enum: [offset, cursor], default: offset}
+        - name: cursor
+          in: query
+          schema: {type: string, maxLength: 4096}
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, limit]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Task'}
+                  limit: {type: integer}
+                  offset: {type: integer, description: Present in offset mode}
+                  next_cursor: {type: string, description: Present only when another cursor page exists}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/tasks/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+    put:
+      tags: [Tasks]
+      operationId: updateTask
+      summary: Update supplied task fields using optimistic concurrency
+      description: >-
+        Requires the current version from a task response. An outdated version
+        returns 409. Missing fields remain unchanged; assignee_id=null removes
+        the assignee. Owner/admin and task author may update all editable
+        fields. The assignee may update only status. Empty changes are a no-op
+        without a new version or history record. Closing sets closed_at;
+        reopening clears it. Task, history and cache revision commit atomically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version]
+              properties:
+                version: {type: integer, format: int64, minimum: 1}
+                title: {type: string, minLength: 1, maxLength: 255}
+                description: {type: string, maxLength: 10000}
+                status: {type: string, enum: [todo, in_progress, done]}
+                assignee_id: {type: integer, format: int64, minimum: 1, nullable: true}
+      responses:
+        '200':
+          description: Current task
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Task'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/tasks/{id}/history:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+    get:
+      tags: [Tasks]
+      operationId: taskHistory
+      summary: List changes in chronological order (team members)
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Offset'}
+      responses:
+        '200':
+          description: History page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/History'}
+                  limit: {type: integer}
+                  offset: {type: integer}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/tasks/{id}/comments:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+    post:
+      tags: [Tasks]
+      operationId: addComment
+      summary: Add a comment (any team member)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content]
+              properties:
+                content: {type: string, minLength: 1, maxLength: 10000}
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Comment'}
+        default: {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Tasks]
+      operationId: listComments
+      summary: List comments in chronological order (team members)
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Offset'}
+      responses:
+        '200':
+          description: Comments page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Comment'}
+                  limit: {type: integer}
+                  offset: {type: integer}
+        default: {$ref: '#/components/responses/Error'}
+  /api/v1/teams/{id}/stats:
+    parameters:
+      - {$ref: '#/components/parameters/ID'}
+    get:
+      tags: [Analytics]
+      operationId: teamStats
+      summary: Get a single team's SQL report (owner or admin)
+      description: >-
+        One CTE query after authorization. Top assignees count currently done
+        tasks closed in the inclusive interval [now-30 days,now], grouped by
+        their current non-null assignee; ties use user_id ASC. Average closure
+        duration covers all currently done tasks from created_at to their
+        latest closed_at. Comments include all team tasks, including zeroes.
+      responses:
+        '200':
+          description: Team statistics
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Stats'}
+        default: {$ref: '#/components/responses/Error'}
+  /health/live:
+    get:
+      operationId: liveness
+      security: []
+      responses:
+        '200':
+          description: HTTP process is alive
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+  /health/ready:
+    get:
+      operationId: readiness
+      security: []
+      responses:
+        '200':
+          description: MySQL is available (Redis is optional)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+        '503':
+          description: MySQL is unavailable
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    Offset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, default: 0}
+  responses:
+    Error:
+      description: >-
+        400 invalid_request (invalid JSON, input, filters or cursor);
+        401 unauthorized (missing, invalid or expired JWT / invalid credentials);
+        403 forbidden (insufficient team permissions);
+        404 not_found (missing or inaccessible resource);
+        409 conflict (duplicate email/membership, stale version, protected owner or assigned member);
+        429 rate_limited (see Retry-After); 500 internal_error.
+      headers:
+        Retry-After:
+          description: Seconds until retry; present for 429 responses
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, example: conflict}
+            message: {type: string, example: task version is outdated}
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [ok, unavailable]}
+    User:
+      type: object
+      required: [id, email, name, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        email: {type: string, format: email}
+        name: {type: string}
+        created_at: {type: string, format: date-time}
+    Team:
+      type: object
+      required: [id, name, created_by, created_at, role]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        created_by: {type: integer, format: int64}
+        created_at: {type: string, format: date-time}
+        role: {type: string, enum: [owner, admin, member]}
+    Task:
+      type: object
+      required: [id, team_id, title, description, status, created_by, assignee_id, created_at, updated_at, closed_at, version]
+      properties:
+        id: {type: integer, format: int64}
+        team_id: {type: integer, format: int64}
+        title: {type: string}
+        description: {type: string}
+        status: {type: string, enum: [todo, in_progress, done]}
+        created_by: {type: integer, format: int64}
+        assignee_id: {type: integer, format: int64, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        closed_at: {type: string, format: date-time, nullable: true}
+        version: {type: integer, format: int64}
+    History:
+      type: object
+      required: [id, task_id, changed_by, changes, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        task_id: {type: integer, format: int64}
+        changed_by: {type: integer, format: int64}
+        created_at: {type: string, format: date-time}
+        changes:
+          type: object
+          additionalProperties:
+            type: object
+            required: [old, new]
+            properties:
+              old: {nullable: true, description: Previous value or null at creation}
+              new: {nullable: true, description: New field value}
+          example:
+            status: {old: todo, new: done}
+            version: {old: 1, new: 2}
+    Comment:
+      type: object
+      required: [id, task_id, user_id, content, created_at]
+      properties:
+        id: {type: integer, format: int64}
+        task_id: {type: integer, format: int64}
+        user_id: {type: integer, format: int64}
+        content: {type: string}
+        created_at: {type: string, format: date-time}
+    Stats:
+      type: object
+      required: [team_id, tasks_by_status, top_assignees, average_close_seconds, comments_total, comments_by_task]
+      properties:
+        team_id: {type: integer, format: int64}
+        tasks_by_status:
+          type: object
+          required: [todo, in_progress, done]
+          properties:
+            todo: {type: integer, format: int64}
+            in_progress: {type: integer, format: int64}
+            done: {type: integer, format: int64}
+        top_assignees:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [user_id, name, closed_tasks]
+            properties:
+              user_id: {type: integer, format: int64}
+              name: {type: string}
+              closed_tasks: {type: integer, format: int64}
+        average_close_seconds: {type: number, format: double, nullable: true, description: Null when no tasks are closed}
+        comments_total: {type: integer, format: int64}
+        comments_by_task:
+          type: array
+          items:
+            type: object
+            required: [task_id, count]
+            properties:
+              task_id: {type: integer, format: int64}
+              count: {type: integer, format: int64}
